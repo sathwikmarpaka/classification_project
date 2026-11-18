@@ -26,7 +26,7 @@ RANDOM_STATE = 42
 
 TARGET = "service_alert_90d"
 
-MODEL_PATH = "models/brake_alert_model.joblib"
+MODEL_PATH = "brake_alert_model.joblib"
 
 
 # --------------------------------
