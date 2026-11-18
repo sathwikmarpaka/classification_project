@@ -1,20 +1,9 @@
 
-import numpy as np
 import pandas as pd
 import joblib
-import os
+from pathlib import Path
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    accuracy_score,
-    balanced_accuracy_score,
-    classification_report,
-    confusion_matrix,
-    f1_score,
-    roc_auc_score
-)
-
-# Import custom transformer so it is available during loading
+from fastapi import FastAPI, HTTPException
 from model_components import BrakeFeatureEngineer
 
 
@@ -22,20 +11,28 @@ from model_components import BrakeFeatureEngineer
 # 1. Configuration
 # --------------------------------
 
-RANDOM_STATE = 42
+BASE_DIR = Path(__file__).resolve().parent
 
-TARGET = "service_alert_90d"
+MODEL_PATH = BASE_DIR / "brake_alert_model.joblib"
 
-MODEL_PATH = "brake_alert_model.joblib"
+# --------------------------------
+# 2. Create FastAPI Application
+# --------------------------------
+
+app = FastAPI(
+    title="Brake Alert Prediction API",
+    description="Predicts whether a vehicle requires a brake service alert.",
+    version="1.0"
+)
 
 
 # --------------------------------
-# 2. Load Saved Model
+# 3. Load Trained Model
 # --------------------------------
 
-if not os.path.exists(MODEL_PATH):
+if not MODEL_PATH.exists():
     raise FileNotFoundError(
-        f"Model not found at: {MODEL_PATH}. Run train.py first."
+        f"Model file not found: {MODEL_PATH}"
     )
 
 best_model = joblib.load(MODEL_PATH)
@@ -44,100 +41,95 @@ print("Trained model loaded successfully!")
 
 
 # --------------------------------
-# 3. Load Dataset
+# 4. Home Route
 # --------------------------------
 
-df = pd.read_csv("breakpad.csv")
-
-df = df.drop_duplicates().reset_index(drop=True)
-
-
-# --------------------------------
-# 4. Separate Features and Target
-# --------------------------------
-
-X = df.drop(
-    columns=[
-        "customer_id",
-        "vehicle_id",
-        "estimated_km_to_replacement",
-        TARGET
-    ]
-)
-
-y = df[TARGET]
+@app.get("/")
+def home():
+    return {
+        "message": "Brake Alert API is running!",
+        "status": "success"
+    }
 
 
 # --------------------------------
-# 5. Recreate Same Train-Test Split
+# 5. Health Check
 # --------------------------------
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    stratify=y,
-    random_state=RANDOM_STATE
-)
-
-
-# --------------------------------
-# 6. Make Predictions
-# --------------------------------
-
-y_test_pred = best_model.predict(X_test)
-
-y_test_probs = best_model.predict_proba(X_test)[:, 1]
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "model_loaded": True
+    }
 
 
 # --------------------------------
-# 7. Evaluate Model
+# 6. Prediction Route
 # --------------------------------
 
-print("\n========== TEST RESULTS ==========")
+@app.post("/predict")
+def predict(data: dict):
 
-print(
-    f"Accuracy: {accuracy_score(y_test, y_test_pred):.4f}"
-)
+    try:
+        # Convert incoming JSON into DataFrame
+        input_data = pd.DataFrame([data])
 
-print(
-    f"Balanced Accuracy: "
-    f"{balanced_accuracy_score(y_test, y_test_pred):.4f}"
-)
+        # Get expected feature names from trained model
+        expected_features = getattr(
+            best_model,
+            "feature_names_in_",
+            None
+        )
 
-print(
-    f"F1 Score: {f1_score(y_test, y_test_pred):.4f}"
-)
+        if expected_features is not None:
+            missing_features = [
+                feature for feature in expected_features
+                if feature not in input_data.columns
+            ]
 
-print(
-    f"ROC-AUC: {roc_auc_score(y_test, y_test_probs):.4f}"
-)
+            if missing_features:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": "Missing required input features",
+                        "missing_features": missing_features
+                    }
+                )
 
+            input_data = input_data[list(expected_features)]
 
-# --------------------------------
-# 8. Classification Report
-# --------------------------------
+        # Predict service alert
+        prediction = best_model.predict(input_data)[0]
 
-print("\nClassification Report:")
+        # Predict probability
+        probabilities = best_model.predict_proba(input_data)[0]
 
-print(
-    classification_report(
-        y_test,
-        y_test_pred,
-        target_names=["No Alert (0)", "Service Alert (1)"]
-    )
-)
+        classes = list(best_model.classes_)
+        alert_index = classes.index(1)
 
+        alert_probability = float(
+            probabilities[alert_index]
+        )
 
-# --------------------------------
-# 9. Confusion Matrix
-# --------------------------------
+        return {
+            "prediction": int(prediction),
+            "service_alert": bool(prediction == 1),
+            "alert_probability": round(
+                alert_probability, 4
+            ),
+            "message": (
+                "Service Alert Required"
+                if prediction == 1
+                else "No Service Alert Required"
+            )
+        }
 
-print("\nConfusion Matrix:")
+    except HTTPException:
+        raise
 
-print(
-    confusion_matrix(y_test, y_test_pred)
-)
-
-
-print("\nModel testing completed successfully!")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
